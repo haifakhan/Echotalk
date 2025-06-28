@@ -1,28 +1,64 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
 
-const socket = io('http://localhost:5000'); // backend running locally
+const socket = io('http://localhost:5001');
+socket.on('connect', () => console.log('🔌 Socket connected!', socket.id));
+socket.on('disconnect', () => console.log('❌ Socket disconnected'));
 
 export default function Recorder() {
-  const audioRef = useRef<MediaRecorder | null>(null);
+  // 1️⃣ Add state for partial & final transcripts
+  const [partialTranscript, setPartialTranscript] = useState<string>('');
+  const [finalTranscript, setFinalTranscript]     = useState<string>('');
 
   useEffect(() => {
+    // 2️⃣ Set up Socket.IO listeners
+    socket.on('partial_transcript', (text: string) => {
+      setPartialTranscript(text);
+    });
+    socket.on('final_transcript', (text: string) => {
+      setFinalTranscript(prev => (prev ? prev + ' ' : '') + text);
+    });
+
+    // 3️⃣ Cleanup listeners on unmount
+    return () => {
+      socket.off('partial_transcript');
+      socket.off('final_transcript');
+    };
+  }, []);
+
+  useEffect(() => {
+    // 4️⃣ Your existing mic + PCM streaming logic
     async function setupMic() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      audioRef.current = mediaRecorder;
+      const audioContext = new AudioContext({ sampleRate: 16000 });
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
 
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data.size > 0) {
-          socket.emit('audio_chunk', e.data); // send audio chunk to server
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+
+      processor.onaudioprocess = (e) => {
+        const pcmData = e.inputBuffer.getChannelData(0);
+        const int16 = new Int16Array(pcmData.length);
+        for (let i = 0; i < pcmData.length; i++) {
+          int16[i] = Math.max(-1, Math.min(1, pcmData[i])) * 0x7fff;
         }
+        console.log('▶️ Sending audio chunk of', int16.length, 'samples');
+        socket.emit('audio_chunk', int16.buffer);
       };
-
-      mediaRecorder.start(250); // send chunk every 250ms
     }
 
     setupMic();
   }, []);
 
-  return <div className="p-4">🎤 Recording...</div>;
+  return (
+    <div className="p-4">
+      <h2 className="text-xl font-semibold">🎤 Recording…</h2>
+      <div className="mt-4 space-y-2">
+        {/* 5️⃣ Display partial and final transcripts */}
+        <p className="text-gray-500 italic">{partialTranscript}</p>
+        <p className="text-black">{finalTranscript}</p>
+      </div>
+    </div>
+  );
 }
